@@ -5,6 +5,18 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+// Opcode metadata, one packed byte per opcode: bit 7 valid, bits 6-4 immediate
+// length, bits 3-2 pops, bits 1-0 pushes. One lookup replaces the switch.
+const T = new Uint8Array(256), S = (o, a, b, c) => T[o] = 128 | a * 16 | b * 4 | c;
+S(0, 0, 0, 0); S(1, 1, 0, 1); S(2, 4, 0, 1); S(3, 0, 1, 0); S(4, 0, 1, 2);
+S(5, 0, 2, 2); S(6, 0, 2, 3); S(7, 0, 3, 3);
+for (let o = 16; o < 35; o++) if (o !== 23 && o !== 27 && o !== 31) S(o, 0, 2, 1);
+S(23, 0, 1, 1); S(27, 0, 1, 1);
+S(48, 2, 0, 0); S(49, 2, 1, 0); S(50, 2, 1, 0); S(51, 2, 0, 0); S(52, 0, 0, 0);
+S(64, 0, 1, 1); S(65, 0, 2, 0);
+S(80, 0, 1, 0); S(81, 0, 1, 0); S(82, 0, 0, 1); S(83, 0, 1, 0);
+const E = new TextEncoder();
+
 function run(p, inp) {
   const D = new Int32Array(256), C = new Int32Array(64), M = new Int32Array(256);
   const out = new Uint8Array(65536);
@@ -15,30 +27,9 @@ function run(p, inp) {
     if (st === 1000000) return end(10);
     if (pc < 0 || pc >= n) return end(9);
     const op = p[pc];
-    let im = 0, po = 0, pu = 0;
-    switch (op) {
-      case 0x00: break;
-      case 0x01: im = 1; pu = 1; break;
-      case 0x02: im = 4; pu = 1; break;
-      case 0x03: po = 1; break;
-      case 0x04: po = 1; pu = 2; break;
-      case 0x05: po = 2; pu = 2; break;
-      case 0x06: po = 2; pu = 3; break;
-      case 0x07: po = 3; pu = 3; break;
-      case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15:
-      case 0x16: case 0x18: case 0x19: case 0x1a: case 0x1c: case 0x1d:
-      case 0x1e: case 0x20: case 0x21: case 0x22: po = 2; pu = 1; break;
-      case 0x17: case 0x1b: po = 1; pu = 1; break;
-      case 0x30: im = 2; break;
-      case 0x31: case 0x32: im = 2; po = 1; break;
-      case 0x33: im = 2; break;
-      case 0x34: break;
-      case 0x40: po = 1; pu = 1; break;
-      case 0x41: po = 2; break;
-      case 0x50: case 0x51: case 0x53: po = 1; break;
-      case 0x52: pu = 1; break;
-      default: return end(5);
-    }
+    const t = T[op];
+    if (!t) return end(5);
+    const im = t >> 4 & 7, po = t >> 2 & 3, pu = t & 3;
     if (pc + im >= n) return end(9);
     st++;
     if (sp < po) return end(2);
@@ -60,14 +51,15 @@ function run(p, inp) {
       case 0x16: case 0x18: case 0x19: case 0x1a: case 0x1c: case 0x1d:
       case 0x1e: case 0x20: case 0x21: case 0x22: {
         const b = D[sp - 1], a = D[sp - 2];
+        if (op > 0x12 && op < 0x17 && !b) return end(4);
         let r;
         if (op === 0x10) r = (a + b) | 0;
         else if (op === 0x11) r = (a - b) | 0;
         else if (op === 0x12) r = Math.imul(a, b);
-        else if (op === 0x13) { if (!b) return end(4); r = a === -2147483648 && b === -1 ? a : (a / b) | 0; }
-        else if (op === 0x14) { if (!b) return end(4); r = b === -1 ? 0 : (a % b) | 0; }
-        else if (op === 0x15) { if (!b) return end(4); r = Math.floor((a >>> 0) / (b >>> 0)) | 0; }
-        else if (op === 0x16) { if (!b) return end(4); r = ((a >>> 0) % (b >>> 0)) | 0; }
+        else if (op === 0x13) r = a === -2147483648 && b === -1 ? a : (a / b) | 0;
+        else if (op === 0x14) r = b === -1 ? 0 : (a % b) | 0;
+        else if (op === 0x15) r = (a >>> 0) / (b >>> 0) | 0;
+        else if (op === 0x16) r = ((a >>> 0) % (b >>> 0)) | 0;
         else if (op === 0x18) r = a & b;
         else if (op === 0x19) r = a | b;
         else if (op === 0x1a) r = a ^ b;
@@ -113,7 +105,7 @@ function run(p, inp) {
         const s = String(D[sp - 1]);
         if (ol + s.length > 65536) return end(11);
         sp--;
-        for (let i = 0; i < s.length; i++) out[ol++] = s.charCodeAt(i);
+        out.set(E.encode(s), ol); ol += s.length;
         break;
       }
       case 0x51:
